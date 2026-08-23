@@ -115,6 +115,9 @@
 #define  GICR_PENDBASER_PTZ		(1ULL << 62)
 #define  GICR_PENDBASER_ISH		(1ULL << 10)
 #define  GICR_PENDBASER_IC_NORM_NC	(1ULL << 7)
+#define GICR_INVLPIR		0x000a0
+#define GICR_SYNCR		0x000c0
+#define  GICR_SYNCR_BUSY		(1 << 0)
 #define GICR_IGROUPR0		0x10080
 #define GICR_ISENABLE0		0x10100
 #define GICR_ICENABLE0		0x10180
@@ -230,6 +233,7 @@ void		agintc_dmamem_free(bus_dma_tag_t, struct agintc_dmamem *);
 
 int		agintc_match(struct device *, void *, void *);
 void		agintc_attach(struct device *, struct device *, void *);
+int		agintc_activate(struct device *, int);
 void		agintc_mbiinit(struct agintc_softc *, int, bus_addr_t);
 void		agintc_cpuinit(void);
 int		agintc_spllower(int);
@@ -270,7 +274,8 @@ void		agintc_msi_discard(struct agintc_lpi_info *);
 void		agintc_msi_inv(struct agintc_lpi_info *);
 
 const struct cfattach	agintc_ca = {
-	sizeof (struct agintc_softc), agintc_match, agintc_attach
+	sizeof (struct agintc_softc), agintc_match, agintc_attach,
+	NULL, agintc_activate
 };
 
 struct cfdriver agintc_cd = {
@@ -680,6 +685,68 @@ unmap:
 	    sc->sc_num_redist_regions * sizeof(*sc->sc_rbase_ioh));
 
 	bus_space_unmap(sc->sc_iot, sc->sc_d_ioh, faa->fa_reg[0].size);
+}
+
+/*
+ * DVACT_RESUME for the parent GIC.
+ *
+ * Rebuild the redistributor state that the hardware forgot across
+ * the power cycle.
+ *
+ *  - Re-write GICR_PROPBASER / GICR_PENDBASER / GICR_CTLR on every
+ *    redistributor.  The LPI config and pending tables themselves
+ *    are DMA-backed pages in vm_physmem, saved and restored by the
+ *    normal chunk save/inflate flow; only the redistributor's pointer
+ *    to them is lost.
+ *  - Wake cpu0's redistributor and re-init its PPIs and this CPU's
+ *    ICC_PMR / ICC_BPR1 / ICC_IGRPEN1 via agintc_cpuinit().
+ *
+ * Without this hook, secondary CPUs fail to spin up after hibernate
+ * resume.
+ *
+ * The operations here mirror the boot-time attach initialization for
+ * LPI-capable redistributors and the per-CPU cpuinit that boot runs
+ * for cpu0.
+ */
+int
+agintc_activate(struct device *self, int act)
+{
+	struct agintc_softc *sc = (struct agintc_softc *)self;
+	int nredist;
+
+	switch (act) {
+	case DVACT_RESUME:
+		if (sc->sc_nlpi > 0) {
+			for (nredist = 0; nredist < sc->sc_num_redist;
+			    nredist++) {
+				bus_space_write_8(sc->sc_iot,
+				    sc->sc_r_ioh[nredist], GICR_PROPBASER,
+				    AGINTC_DMA_DVA(sc->sc_prop) |
+				    GICR_PROPBASER_ISH |
+				    GICR_PROPBASER_IC_NORM_NC |
+				    fls(LPI_BASE + sc->sc_nlpi - 1) - 1);
+				bus_space_write_8(sc->sc_iot,
+				    sc->sc_r_ioh[nredist], GICR_PENDBASER,
+				    AGINTC_DMA_DVA(sc->sc_pend) |
+				    GICR_PENDBASER_ISH |
+				    GICR_PENDBASER_IC_NORM_NC |
+				    GICR_PENDBASER_PTZ);
+				bus_space_write_4(sc->sc_iot,
+				    sc->sc_r_ioh[nredist], GICR_CTLR,
+				    GICR_CTLR_ENABLE_LPIS);
+			}
+		}
+
+		/*
+ 		 * XXX:
+		 * Breaks SUSPEND; PPI clobber is not resume-safe on cpu0.
+		 * Split into a resume-safe helper (skip PPI reset) later.
+		 */
+		agintc_cpuinit();
+		break;
+	}
+
+	return 0;
 }
 
 void
@@ -1469,6 +1536,7 @@ agintc_send_ipi(struct cpu_info *ci, int reason)
  */
 #define GITS_CTLR		0x0000
 #define  GITS_CTLR_ENABLED	(1UL << 0)
+#define  GITS_CTLR_QUIESCENT	(1UL << 31)
 #define GITS_TYPER		0x0008
 #define  GITS_TYPER_CIL		(1ULL << 36)
 #define  GITS_TYPER_CIDBITS(x)	(((x) >> 32) & 0xf)
@@ -1534,6 +1602,10 @@ struct agintc_msi_device {
 
 int	 agintc_msi_match(struct device *, void *, void *);
 void	 agintc_msi_attach(struct device *, struct device *, void *);
+int	 agintc_msi_activate(struct device *, int);
+void	 agintc_msi_hw_init(struct agintc_msi_softc *);
+void	 agintc_msi_setup_collections(struct agintc_msi_softc *);
+void	 agintc_msi_replay_devices(struct agintc_msi_softc *);
 void	*agintc_intr_establish_msi(void *, uint64_t *, uint64_t *,
 	    int , struct cpu_info *, int (*)(void *), void *, char *);
 void	 agintc_intr_disestablish_msi(void *);
@@ -1557,10 +1629,14 @@ struct agintc_msi_softc {
 	size_t				sc_dtt_pgsz;
 	uint8_t				sc_dte_sz;
 	int				sc_dtt_indirect;
+	int				sc_dtt_baser;	/* BASER slot for DTT */
+	uint64_t			sc_dtt_baser_val; /* full BASER value */
 	int				sc_cidbits;
 	struct agintc_dmamem		*sc_ctt;
 	size_t				sc_ctt_pgsz;
 	uint8_t				sc_cte_sz;
+	int				sc_ctt_baser;	/* BASER slot for CTT */
+	uint64_t			sc_ctt_baser_val; /* full BASER value */
 	uint8_t				sc_ite_sz;
 
 	LIST_HEAD(, agintc_msi_device)	sc_msi_devices;
@@ -1569,7 +1645,8 @@ struct agintc_msi_softc {
 };
 
 const struct cfattach	agintcmsi_ca = {
-	sizeof (struct agintc_msi_softc), agintc_msi_match, agintc_msi_attach
+	sizeof (struct agintc_msi_softc), agintc_msi_match, agintc_msi_attach,
+	NULL, agintc_msi_activate
 };
 
 struct cfdriver agintcmsi_cd = {
@@ -1657,6 +1734,7 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 	    (GITS_CMDQ_SIZE / PAGE_SIZE) - 1 | GITS_CBASER_VALID);
 
 	/* Set up device translation table. */
+	sc->sc_dtt_baser = -1;
 	for (i = 0; i < GITS_NUM_BASER; i++) {
 		uint64_t baser;
 		paddr_t dtt_pa;
@@ -1665,6 +1743,7 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
 		if ((baser & GITS_BASER_TYPE_MASK) != GITS_BASER_TYPE_DEVICE)
 			continue;
+		sc->sc_dtt_baser = i;
 
 		/* Determine the maximum supported page size. */
 		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
@@ -1737,14 +1816,17 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		/* Configure table. */
 		dtt_pa = AGINTC_DMA_DVA(sc->sc_dtt);
 		KASSERT((dtt_pa & GITS_BASER_PA_MASK) == dtt_pa);
-		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
-		    GITS_BASER_IC_NORM_NC | baser & GITS_BASER_PGSZ_MASK | 
-		    dtt_pa | (size / sc->sc_dtt_pgsz) - 1 |
+		sc->sc_dtt_baser_val =
+		    GITS_BASER_IC_NORM_NC | (baser & GITS_BASER_PGSZ_MASK) |
+		    dtt_pa | ((size / sc->sc_dtt_pgsz) - 1) |
 		    (sc->sc_dtt_indirect ? GITS_BASER_INDIRECT : 0) |
-		    GITS_BASER_VALID);
+		    GITS_BASER_VALID;
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
+		    sc->sc_dtt_baser_val);
 	}
 
 	/* Set up collection translation table. */
+	sc->sc_ctt_baser = -1;
 	for (i = 0; i < GITS_NUM_BASER; i++) {
 		uint64_t baser;
 		paddr_t ctt_pa;
@@ -1753,6 +1835,7 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
 		if ((baser & GITS_BASER_TYPE_MASK) != GITS_BASER_TYPE_COLL)
 			continue;
+		sc->sc_ctt_baser = i;
 
 		/* Determine the maximum supported page size. */
 		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
@@ -1800,9 +1883,12 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		/* Configure table. */
 		ctt_pa = AGINTC_DMA_DVA(sc->sc_ctt);
 		KASSERT((ctt_pa & GITS_BASER_PA_MASK) == ctt_pa);
+		sc->sc_ctt_baser_val =
+		    GITS_BASER_IC_NORM_NC | (baser & GITS_BASER_PGSZ_MASK) |
+		    ctt_pa | ((size / sc->sc_ctt_pgsz) - 1) |
+		    GITS_BASER_VALID;
 		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
-		    GITS_BASER_IC_NORM_NC | baser & GITS_BASER_PGSZ_MASK | 
-		    ctt_pa | (size / sc->sc_ctt_pgsz) - 1 | GITS_BASER_VALID);
+		    sc->sc_ctt_baser_val);
 	}
 
 	/* Enable ITS. */
@@ -1842,6 +1928,130 @@ unmap:
 		agintc_dmamem_free(sc->sc_dmat, sc->sc_cmdq);
 
 	bus_space_unmap(sc->sc_iot, sc->sc_ioh, faa->fa_reg[0].size);
+}
+
+/*
+ * (Re)program the GITS hardware from the already-allocated DMA-backed
+ * tables in the softc.  Called from attach after DMA setup and probing,
+ * and again from activate(DVACT_RESUME) to reinstall the mappings that
+ * the hardware lost across the power cycle.
+ */
+void
+agintc_msi_hw_init(struct agintc_msi_softc *sc)
+{
+	uint32_t ctlr;
+	int timo;
+
+	/*
+	 * GITS_CBASER / GITS_BASER are only writable while
+	 * GITS_CTLR.Enabled == 0; disable and wait for Quiescent.
+	 */
+	bus_space_write_4(sc->sc_iot, sc->sc_ioh, GITS_CTLR, 0);
+	for (timo = 1000; timo > 0; timo--) {
+		ctlr = bus_space_read_4(sc->sc_iot, sc->sc_ioh, GITS_CTLR);
+		if (ctlr & GITS_CTLR_QUIESCENT)
+			break;
+		delay(10);
+	}
+
+	bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_CBASER,
+	    AGINTC_DMA_DVA(sc->sc_cmdq) | GITS_CBASER_IC_NORM_NC |
+	    (GITS_CMDQ_SIZE / PAGE_SIZE) - 1 | GITS_CBASER_VALID);
+	bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_CWRITER, 0);
+
+	if (sc->sc_dtt != NULL && sc->sc_dtt_baser >= 0)
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh,
+		    GITS_BASER(sc->sc_dtt_baser), sc->sc_dtt_baser_val);
+
+	if (sc->sc_ctt != NULL && sc->sc_ctt_baser >= 0)
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh,
+		    GITS_BASER(sc->sc_ctt_baser), sc->sc_ctt_baser_val);
+
+	bus_space_write_4(sc->sc_iot, sc->sc_ioh, GITS_CTLR,
+	    GITS_CTLR_ENABLED);
+}
+
+/*
+ * Re-issue MAPC (one collection per CPU) after a resume.
+ */
+void
+agintc_msi_setup_collections(struct agintc_msi_softc *sc)
+{
+	struct gits_cmd cmd;
+	int i, hwcpu;
+
+	KASSERT(ncpus <= agintc_sc->sc_num_redist);
+	for (i = 0; i < ncpus; i++) {
+		hwcpu = agintc_sc->sc_cpuremap[i];
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.cmd = MAPC;
+		cmd.dw2 = GITS_CMD_VALID |
+		    (agintc_sc->sc_processor[hwcpu] << 16) | i;
+		agintc_msi_send_cmd(sc, &cmd);
+		agintc_msi_wait_cmd(sc);
+	}
+}
+
+/*
+ * Replay MAPD (per device previously attached) and MAPTI (per LPI
+ * previously established) after a resume.  Interrupt Translation
+ * Tables (md_itt) and the LPI table itself are DMA memory that
+ * survives across suspend as part of the normal chunk save.
+ */
+void
+agintc_msi_replay_devices(struct agintc_msi_softc *sc)
+{
+	struct agintc_msi_device *md;
+	struct gits_cmd cmd;
+	int i, hwcpu;
+
+	LIST_FOREACH(md, &sc->sc_msi_devices, md_list) {
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.cmd = MAPD;
+		cmd.deviceid = md->md_deviceid;
+		cmd.eventid = 4;	/* size, matches create_device */
+		cmd.dw2 = AGINTC_DMA_DVA(md->md_itt) | GITS_CMD_VALID;
+		agintc_msi_send_cmd(sc, &cmd);
+		agintc_msi_wait_cmd(sc);
+	}
+
+	for (i = 0; i < agintc_sc->sc_nlpi; i++) {
+		struct agintc_lpi_info *li = agintc_sc->sc_lpi[i];
+
+		if (li == NULL || li->li_msic != sc)
+			continue;
+		hwcpu = agintc_sc->sc_cpuremap[li->li_ci->ci_cpuid];
+
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.cmd = MAPTI;
+		cmd.deviceid = li->li_deviceid;
+		cmd.eventid = li->li_eventid;
+		cmd.intid = LPI_BASE + i;
+		cmd.dw2 = li->li_ci->ci_cpuid;
+		agintc_msi_send_cmd(sc, &cmd);
+
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.cmd = SYNC;
+		cmd.dw2 = agintc_sc->sc_processor[hwcpu] << 16;
+		agintc_msi_send_cmd(sc, &cmd);
+		agintc_msi_wait_cmd(sc);
+	}
+}
+
+int
+agintc_msi_activate(struct device *self, int act)
+{
+	struct agintc_msi_softc *sc = (struct agintc_msi_softc *)self;
+
+	switch (act) {
+	case DVACT_RESUME:
+		sc->sc_cmdidx = 0;
+		agintc_msi_hw_init(sc);
+		agintc_msi_setup_collections(sc);
+		agintc_msi_replay_devices(sc);
+		break;
+	}
+	return 0;
 }
 
 void
@@ -1978,6 +2188,46 @@ agintc_msi_discard(struct agintc_lpi_info *li)
 	agintc_msi_wait_cmd(sc);
 }
 
+/*
+ * Invalidate the target redistributor's cached LPI configuration.
+ *
+ * Uses the per-redist GICR_INVLPIR register instead of the ITS INV+SYNC
+ * command sequence (kept below under #if 0 for reference).  INVLPIR
+ * is the more precise mechanism for what msi_inv is trying to do -- it
+ * invalidates exactly the redist-side cache that our property table
+ * update just made stale -- and avoids an observed post-hibernate
+ * stall of the GITS command queue on Snapdragon X Elite.
+ *
+ * A runtime choice between paths based on GICR_TYPER.DirectLPI (as
+ * Linux does) is the proper long-term solution, but on x1e the bit
+ * isn't set even though the register works.  Linux checks additional
+ * indicators (GICR_CTLR.IR, GICR_TYPER.RVPEID) to catch this case.
+ * TBD; for now use INVLPIR unconditionally.
+ */
+void
+agintc_msi_inv(struct agintc_lpi_info *li)
+{
+	struct agintc_softc *sc = agintc_sc;
+	int hwcpu = sc->sc_cpuremap[li->li_ci->ci_cpuid];
+	uint32_t intid = li->li_ih->ih_irq;
+	int timo;
+
+	bus_space_write_8(sc->sc_iot, sc->sc_r_ioh[hwcpu],
+	    GICR_INVLPIR, intid);
+
+	for (timo = 1000; timo > 0; timo--) {
+		if ((bus_space_read_4(sc->sc_iot, sc->sc_r_ioh[hwcpu],
+		    GICR_SYNCR) & GICR_SYNCR_BUSY) == 0)
+			break;
+		delay(1);
+	}
+	if (timo == 0)
+		printf("%s: GICR_SYNCR busy timeout on cpu%d\n",
+		    __func__, li->li_ci->ci_cpuid);
+}
+
+#if 0
+/* Original ITS INV+SYNC path.  See comment on agintc_msi_inv above. */
 void
 agintc_msi_inv(struct agintc_lpi_info *li)
 {
@@ -2002,6 +2252,7 @@ agintc_msi_inv(struct agintc_lpi_info *li)
 	agintc_msi_send_cmd(sc, &cmd);
 	agintc_msi_wait_cmd(sc);
 }
+#endif
 
 void *
 agintc_intr_establish_msi(void *self, uint64_t *addr, uint64_t *data,

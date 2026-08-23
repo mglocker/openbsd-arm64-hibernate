@@ -26,6 +26,7 @@ option		PCIVERBOSE
 option		USER_PCICONF	# user-space PCI configuration
 option		USBVERBOSE
 option		SUSPEND
+option		HIBERNATE
 
 makeoptions	KERNEL_BASE_PHYS="0x00200000"
 makeoptions	KERNEL_BASE_VIRT="0xffffff8000200000"

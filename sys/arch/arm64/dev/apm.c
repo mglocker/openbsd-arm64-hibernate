@@ -423,13 +423,21 @@ resume_mp(void)
 
 #endif /* MULTIPROCESSOR */
 
+static int arm64_sleep_mode = SLEEP_SUSPEND;
+
 int
 sleep_showstate(void *v, int sleepmode)
 {
-	if (sleepmode == SLEEP_SUSPEND)
+	switch (sleepmode) {
+	case SLEEP_SUSPEND:
+#ifdef HIBERNATE
+	case SLEEP_HIBERNATE:
+#endif
+		arm64_sleep_mode = sleepmode;
 		return 0;
-
-	return EOPNOTSUPP;
+	default:
+		return EOPNOTSUPP;
+	}
 }
 
 int
@@ -441,6 +449,40 @@ sleep_setstate(void *v)
 int
 gosleep(void *v)
 {
+#ifdef HIBERNATE
+	extern void (*powerdownfn)(void);
+	extern struct tty *constty;
+
+	if (arm64_sleep_mode == SLEEP_HIBERNATE) {
+		extern int hibernate_resumed;
+
+		if (hibernate_suspend()) {
+			printf("hibernate_suspend failed\n");
+			return ECANCELED;
+		}
+
+		if (hibernate_resumed) {
+			/*
+			 * Suspending's constty (a .data global TTY pointer)
+			 * points at a TTY whose output queue state at save
+			 * time can't drain post-longjmp -- tputchar blocks
+			 * forever.  Clear constty so printf routes only via
+			 * cn_putc + msgbuf; wsdisplay's DVACT_RESUME will
+			 * re-establish TTY routing later.
+			 */
+			constty = NULL;
+			hibernate_resumed = 0;
+			return 0;
+		}
+
+		boothowto |= RB_POWERDOWN;
+		config_suspend_all(DVACT_POWERDOWN);
+		boothowto &= ~RB_POWERDOWN;
+		if (powerdownfn != NULL)
+			(*powerdownfn)();
+		return EIO;
+	}
+#endif /* HIBERNATE */
 	return cpu_suspend_primary();
 }
 

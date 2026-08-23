@@ -55,6 +55,11 @@
 #include <dev/softraidvar.h>
 #endif
 
+#ifdef HIBERNATE
+#include <machine/hibernate_var.h>
+#include <sys/hibernate.h>
+#endif /* HIBERNATE */
+
 extern vaddr_t virtual_avail;
 extern uint64_t esym;
 
@@ -305,6 +310,9 @@ cpu_startup(void)
 		printf("kernel does not support -c; continuing..\n");
 #endif
 	}
+#ifdef HIBERNATE
+	preallocate_hibernate_memory();
+#endif /* HIBERNATE */
 }
 
 void    cpu_switchto_asm(struct proc *, struct proc *);

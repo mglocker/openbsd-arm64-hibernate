@@ -72,6 +72,7 @@ db_trap(int type, int code)
 			static int ddb_msg_shown;
 
 			if (! ddb_msg_shown) {
+				ddb_msg_shown = 1;
 				/* show on-proc threads */
 				db_show_all_procs(0, 0, 0, "o");
 			}
@@ -81,12 +82,9 @@ db_trap(int type, int code)
 
 			if (db_print_position() != 0)
 				db_printf("\n");
-			if (! ddb_msg_shown) {
-				db_printf(
+			db_printf(
 "https://www.openbsd.org/ddb.html describes the minimum info required in bug\n"
 "reports.  Insufficient info makes it difficult to find and fix bugs.\n");
-				ddb_msg_shown = 1;
-			}
 		}
 
 		db_command_loop();

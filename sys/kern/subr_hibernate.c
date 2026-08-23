@@ -22,6 +22,8 @@
 #include <sys/param.h>
 #include <sys/tree.h>
 #include <sys/systm.h>
+#include <sys/proc.h>
+#include <sys/device.h>
 #include <sys/disklabel.h>
 #include <sys/disk.h>
 #include <sys/conf.h>
@@ -88,6 +90,9 @@ paddr_t global_pig_start;
  */
 vaddr_t global_piglet_va;
 paddr_t global_piglet_pa;
+#ifdef __aarch64__
+extern int hibernate_resumed;
+#endif
 
 /* #define HIB_DEBUG */
 #ifdef HIB_DEBUG
@@ -106,6 +111,10 @@ extern long __guard_local;
 /* Retguard phys address (need to skip this region during unpack) */
 paddr_t retguard_start_phys, retguard_end_phys;
 extern char __retguard_start, __retguard_end;
+
+/* Hibernate data phys address (need to skip this region during unpack) */
+paddr_t hibdata_start_phys, hibdata_end_phys;
+extern char __hibdata_start, __hibdata_end;
 
 void hibernate_copy_chunk_to_piglet(paddr_t, vaddr_t, size_t);
 int hibernate_calc_rle(paddr_t, paddr_t);
@@ -1192,6 +1201,10 @@ hibernate_resume(void)
 	    &retguard_start_phys);
 	pmap_extract(pmap_kernel(), (vaddr_t)&__retguard_end,
 	    &retguard_end_phys);
+	pmap_extract(pmap_kernel(), (vaddr_t)&__hibdata_start,
+	    &hibdata_start_phys);
+	pmap_extract(pmap_kernel(), (vaddr_t)&__hibdata_end,
+	    &hibdata_end_phys);
 
 	hibernate_preserve_entropy(&disk_hib);
 
@@ -1274,6 +1287,11 @@ hibernate_unpack_image(union hibernate_info *hib)
 		image_cur += chunks[fchunks[i]].compressed_size;
 	}
 
+#ifdef __aarch64__
+	hibernate_dcache_flush_machdep();
+	hibernate_retguard_copy_machdep(global_piglet_va + 110 * PAGE_SIZE);
+	hibernate_resume_machdep(global_piglet_va + HIBERNATE_SAVED_CTX_PAGE);
+#else
 	/*
 	 * Resume the loaded kernel by jumping to the MD resume vector.
 	 * We won't be returning from this call. We pass the location of
@@ -1288,6 +1306,8 @@ hibernate_unpack_image(union hibernate_info *hib)
 	 * copy code in hibernate_resume_machdep.)
 	 */
 	hibernate_resume_machdep(global_piglet_va + (110 * PAGE_SIZE));
+#endif
+	/* NOTREACHED */
 }
 
 /*
@@ -1953,6 +1973,10 @@ hibernate_suspend(void)
 	    &retguard_start_phys);
 	pmap_extract(pmap_kernel(), (vaddr_t)&__retguard_end,
 	    &retguard_end_phys);
+	pmap_extract(pmap_kernel(), (vaddr_t)&__hibdata_start,
+	    &hibdata_start_phys);
+	pmap_extract(pmap_kernel(), (vaddr_t)&__hibdata_end,
+	    &hibdata_end_phys);
 
 	/* Calculate block offsets in swap */
 	hib->image_offset = ctod(start);
@@ -1965,6 +1989,14 @@ hibernate_suspend(void)
 	    btodb(HIBERNATE_CHUNK_TABLE_SIZE));
 
 	pmap_activate(curproc);
+#ifdef __aarch64__
+	/* setjmp-style save; returns 1 on the longjmp-back resume path. */
+	if (hibernate_save_state_machdep((void *)(global_piglet_va +
+	    HIBERNATE_SAVED_CTX_PAGE)) == 1) {
+		hibernate_resumed = 1;
+		return (0);
+	}
+#endif
 	DPRINTF("hibernate: writing chunks\n");
 	if (hibernate_write_chunks(hib)) {
 		DPRINTF("hibernate_write_chunks failed\n");
@@ -2007,8 +2039,8 @@ hibernate_alloc(void)
 		return (ENOMEM);
 
 	pmap_activate(curproc);
-	pmap_kenter_pa(HIBERNATE_HIBALLOC_PAGE, HIBERNATE_HIBALLOC_PAGE,
-	    PROT_READ | PROT_WRITE);
+	if (hibernate_pmap_setup_md())
+		return ENOMEM;
 
 	/*
 	 * Allocate VA for the temp page.
@@ -2024,7 +2056,7 @@ hibernate_alloc(void)
 
 	return (0);
 unmap:
-	pmap_kremove(HIBERNATE_HIBALLOC_PAGE, PAGE_SIZE);
+	hibernate_pmap_teardown_md();
 	pmap_update(pmap_kernel());
 	return (ENOMEM);
 }
@@ -2037,14 +2069,17 @@ hibernate_free(void)
 {
 	pmap_activate(curproc);
 
+#ifndef __aarch64__
+	/* XXX arm64: uvm_unmap on kernel_map hangs post-resume; leak instead */
 	if (hibernate_temp_page) {
 		pmap_kremove(hibernate_temp_page, PAGE_SIZE);
 		km_free((void *)hibernate_temp_page, PAGE_SIZE,
 		    &kv_any, &kp_none);
 	}
+#endif
 
 	hibernate_temp_page = 0;
-	pmap_kremove(HIBERNATE_HIBALLOC_PAGE, PAGE_SIZE);
+	hibernate_pmap_teardown_md();
 	pmap_update(pmap_kernel());
 }
 
@@ -2054,7 +2089,7 @@ preallocate_hibernate_memory(void)
 	/* Preallocate a piglet */
 	if (ptoa((psize_t)physmem) > HIBERNATE_MIN_MEMORY) {
 		if (uvm_pmr_alloc_piglet(&global_piglet_va, &global_piglet_pa,
-		    HIBERNATE_CHUNK_SIZE * 4, HIBERNATE_CHUNK_SIZE)) {
+		    HIBERNATE_CHUNK_SIZE * 8, HIBERNATE_CHUNK_SIZE)) {
 			DPRINTF("%s: failed to preallocate hibernate mem\n",
 			    __func__);
 			global_piglet_va = 0;

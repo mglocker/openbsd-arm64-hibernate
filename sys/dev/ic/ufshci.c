@@ -50,6 +50,9 @@
 #include <sys/hibernate.h>
 #include <sys/disklabel.h>
 #include <sys/disk.h>
+#ifdef __aarch64__
+#include <machine/cpufunc.h>		/* cpu_dcache_wb_range, _inv_range */
+#endif
 #endif
 
 #ifdef UFSHCI_DEBUG
@@ -1990,6 +1993,19 @@ ufshci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 	if (UFSHCI_READ_4(my->sc, UFSHCI_REG_UTRLRSR) != 1)
 		return EIO;
 
+#ifdef __aarch64__
+	/*
+	 * On arm64 the data cache is not snoop-coherent with device DMA, so
+	 * the UTRD/UCD/data buffer the controller is about to read may still
+	 * be sitting in the CPU's cache.  Clean those lines back to RAM
+	 * before the doorbell or the controller will DMA stale RAM and the
+	 * write will land on disk as zeros.  Not needed on amd64 (snooping).
+	 */
+	cpu_dcache_wb_range((vaddr_t)&my->utrd, sizeof(my->utrd));
+	cpu_dcache_wb_range((vaddr_t)&my->ucd,  sizeof(my->ucd));
+	cpu_dcache_wb_range((vaddr_t)addr,      size);
+#endif
+
 	ufshci_doorbell_write(my->sc, slot);
 
 	/* ufshci_doorbell_poll() adaption for hibernate. */
@@ -2003,6 +2019,16 @@ ufshci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 	if (timeout_us == 0)
 		return EIO;
 	UFSHCI_WRITE_4(my->sc, UFSHCI_REG_UTRLCNR, (1U << slot));
+
+#ifdef __aarch64__
+	/*
+	 * The controller has written the response UPIU back into our UCD and
+	 * updated the UTRD's OCS field.  Invalidate the lines so the CPU
+	 * reads the post-DMA values rather than its stale cached copy.
+	 */
+	cpu_dcache_inv_range((vaddr_t)&my->utrd, sizeof(my->utrd));
+	cpu_dcache_inv_range((vaddr_t)&my->ucd,  sizeof(my->ucd));
+#endif
 
 	/* Check if the command was successfully executed. */
 	if (my->utrd.dw2 != UFSHCI_UTRD_DW2_OCS_SUCCESS)

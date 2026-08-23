@@ -15,6 +15,8 @@ file	arch/arm64/arm64/copystr.S
 file	arch/arm64/arm64/cpuswitch.S
 file	arch/arm64/arm64/conf.c
 file	arch/arm64/arm64/disksubr.c
+file	arch/arm64/arm64/hibernate_machdep.c	hibernate
+file	arch/arm64/arm64/hibernate_asm.S	hibernate
 file	arch/arm64/arm64/locore.S
 file	arch/arm64/arm64/machdep.c
 file	arch/arm64/arm64/mem.c
