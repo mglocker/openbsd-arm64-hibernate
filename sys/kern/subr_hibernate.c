@@ -2070,6 +2070,12 @@ unmap:
 void
 hibernate_free(void)
 {
+	if (hibernate_temp_page) {
+		pmap_kremove(hibernate_temp_page, PAGE_SIZE);
+		km_free((void *)hibernate_temp_page, PAGE_SIZE,
+		    &kv_any, &kp_none);
+	}
+
 	pmap_activate(curproc);
 
 	hibernate_temp_page = 0;
