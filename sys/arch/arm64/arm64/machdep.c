@@ -1094,6 +1094,11 @@ initarm(struct arm64_bootparams *abp)
 
 	kmeminit_nkmempages();
 
+	/* Add the initial 64MB block back. */
+	reg.addr = memstart;
+	reg.size = memend - memstart;
+	memreg_add(&reg);
+
 	/*
 	 * Make sure that we have enough KVA to initialize UVM.  In
 	 * particular, we need enough KVA to be able to allocate the

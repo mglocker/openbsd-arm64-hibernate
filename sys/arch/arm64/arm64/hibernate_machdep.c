@@ -40,13 +40,15 @@
 #include <machine/pmap.h>
 #include <machine/pte.h>
 
+#include <dev/ofw/fdt.h>
+
 #include "sd.h"
 #include "softraid.h"
 #include "ufshci.h"
 
 /* Hibernate support */
 #define HIB_PTE_ATTRS	(ATTR_AF | ATTR_SH(SH_INNER) | ATTR_AP(0) | \
-			    ATTR_IDX(PTE_ATTR_WB))
+			    ATTR_nG | ATTR_IDX(PTE_ATTR_WB))
 #define HIB_OA_MASK	0x0000fffffffff000ULL	/* output address [47:12] */
 
 void	hibernate_enter_resume_4k_pte(vaddr_t, paddr_t);
@@ -59,7 +61,8 @@ extern	int vm_nphysseg;
 
 /* Resume PT anchors, published by hibernate_populate_resume_pt() */
 vaddr_t hibernate_resume_pt_va __hibdata;
-paddr_t hibernate_resume_pt_pa __hibdata;
+paddr_t hibernate_resume_pt0_pa __hibdata;
+paddr_t hibernate_resume_pt1_pa __hibdata;
 paddr_t hibernate_stack_top_pa __hibdata;
 
 /* Set by hibernate_suspend() on the resume path; read by gosleep(). */
@@ -80,10 +83,14 @@ static int8_t	hibernate_l1hi_to_l2pool[VP_IDX1_CNT] __hibdata;
 static int	hibernate_l2hipool_next __hibdata;
 static int	hibernate_l0hi_slot __hibdata;
 
+/* Kernel-VA L2 pool: one page per distinct PT1_L1 slot */
+static int8_t	hibernate_pt1_l1_to_l2pool[VP_IDX1_CNT] __hibdata;
+static int	hibernate_pt1_l2pool_next __hibdata;
+
 static paddr_t
 hibernate_get_l2_low_pa(int l1_idx)
 {
-	paddr_t piglet_pa = hibernate_resume_pt_pa - HIBERNATE_L0_PAGE;
+	paddr_t piglet_pa = hibernate_resume_pt0_pa - HIBERNATE_L0_PAGE;
 	int slot;
 
 	if (hibernate_l1_to_l2pool[l1_idx] < 0) {
@@ -101,7 +108,7 @@ hibernate_get_l2_low_pa(int l1_idx)
 static paddr_t
 hibernate_get_l2_hi_pa(int l1_idx)
 {
-	paddr_t piglet_pa = hibernate_resume_pt_pa - HIBERNATE_L0_PAGE;
+	paddr_t piglet_pa = hibernate_resume_pt0_pa - HIBERNATE_L0_PAGE;
 	int slot;
 
 	if (hibernate_l1hi_to_l2pool[l1_idx] < 0) {
@@ -114,6 +121,24 @@ hibernate_get_l2_hi_pa(int l1_idx)
 
 	return piglet_pa + HIBERNATE_L2_HI_POOL +
 	    hibernate_l1hi_to_l2pool[l1_idx] * PAGE_SIZE;
+}
+
+static paddr_t
+hibernate_get_pt1_l2_pa(int l1_idx)
+{
+	paddr_t piglet_pa = hibernate_resume_pt0_pa - HIBERNATE_L0_PAGE;
+	int slot;
+
+	if (hibernate_pt1_l1_to_l2pool[l1_idx] < 0) {
+		KASSERT(hibernate_pt1_l2pool_next < HIBERNATE_PT1_L2_POOL_COUNT);
+		slot = hibernate_pt1_l2pool_next++;
+		hibernate_pt1_l1_to_l2pool[l1_idx] = slot;
+		bzero((caddr_t)(hibernate_resume_pt_va +
+		    HIBERNATE_PT1_L2_POOL + slot * PAGE_SIZE), PAGE_SIZE);
+	}
+
+	return piglet_pa + HIBERNATE_PT1_L2_POOL +
+	    hibernate_pt1_l1_to_l2pool[l1_idx] * PAGE_SIZE;
 }
 
 /*
@@ -162,41 +187,27 @@ get_hibernate_io_function(dev_t dev)
 	return NULL;
 }
 
-struct mem_region {
-	vaddr_t start;
-	vsize_t size;
-};
-
 /*
  * Gather MD-specific data and store into hiber_info
  */
 int
 get_hibernate_info_md(union hibernate_info *hiber_info)
 {
-	extern struct mem_region *pmap_allocated;
-	struct mem_region *mp;
+	extern struct fdt_reg memreg[];
+	extern int nmemreg;
 	int i;
 
-	if (vm_nphysseg > nitems(hiber_info->ranges))
+	if (nmemreg > nitems(hiber_info->ranges))
 		return 1;
 
 	/* Calculate memory ranges */
-	hiber_info->nranges = vm_nphysseg;
+	hiber_info->nranges = nmemreg;
 	hiber_info->image_size = 0;
 
-	for (i = 0; i < vm_nphysseg; i++) {
-		hiber_info->ranges[i].base = ptoa(vm_physmem[i].start);
-		hiber_info->ranges[i].end = ptoa(vm_physmem[i].end);
-		hiber_info->image_size += hiber_info->ranges[i].end -
-		    hiber_info->ranges[i].base;
-	}
-
-	for (mp = pmap_allocated; mp->size; mp++, i++) {
-		hiber_info->ranges[i].base = mp->start;
-		hiber_info->ranges[i].end = mp->start + mp->size;
-		hiber_info->image_size += hiber_info->ranges[i].end -
-		    hiber_info->ranges[i].base;
-		hiber_info->nranges++;
+	for (i = 0; i < nmemreg; i++) {
+		hiber_info->ranges[i].base = memreg[i].addr;
+		hiber_info->ranges[i].end = memreg[i].addr + memreg[i].size;
+		hiber_info->image_size += memreg[i].size;
 	}
 
 	hibernate_sort_ranges(hiber_info);
@@ -214,7 +225,7 @@ get_hibernate_info_md(union hibernate_info *hiber_info)
 void
 hibernate_enter_resume_mapping(vaddr_t va, paddr_t pa, int size)
 {
-	paddr_t piglet_pa = hibernate_resume_pt_pa - HIBERNATE_L0_PAGE;
+	paddr_t piglet_pa = hibernate_resume_pt0_pa - HIBERNATE_L0_PAGE;
 
 	/* HIB_SKIP bit-bucket: PA 0x21000 isn't DRAM on arm64, redirect to piglet */
 	if (pa == HIBERNATE_INFLATE_PAGE)
@@ -233,9 +244,34 @@ void
 hibernate_enter_resume_2m_block(vaddr_t va, paddr_t pa)
 {
 	uint64_t *pte, npte;
-	paddr_t piglet_pa = hibernate_resume_pt_pa - HIBERNATE_L0_PAGE;
+	paddr_t piglet_pa = hibernate_resume_pt0_pa - HIBERNATE_L0_PAGE;
 
 	KASSERT((pa & ((1ULL << L2_SHIFT) - 1)) == 0);
+	KASSERT(va < VM_MAX_KERNEL_ADDRESS);
+
+	if (va >= VM_MIN_KERNEL_ADDRESS) {
+		int l1_idx = (va >> L1_SHIFT) & (VP_IDX1_CNT - 1);
+		paddr_t l2pool_pa = hibernate_get_pt1_l2_pa(l1_idx);
+		vaddr_t l2pool_va = hibernate_resume_pt_va +
+		    HIBERNATE_PT1_L2_POOL +
+		    hibernate_pt1_l1_to_l2pool[l1_idx] * PAGE_SIZE;
+
+		pte = (uint64_t *)(hibernate_resume_pt_va + HIBERNATE_PT1_L1_PAGE +
+		    (l1_idx * sizeof(uint64_t)));
+		npte = (l2pool_pa & HIB_OA_MASK) | L1_TABLE;
+		*pte = 0;
+		hibernate_flush();
+		*pte = npte;
+
+		pte = (uint64_t *)(l2pool_va +
+		    (((va >> L2_SHIFT) & (VP_IDX2_CNT - 1)) *
+		    sizeof(uint64_t)));
+		npte = (pa & HIB_OA_MASK) | HIB_PTE_ATTRS | L2_BLOCK;
+		*pte = 0;
+		hibernate_flush();
+		*pte = npte;
+		return;
+	}
 
 	if (va < (1ULL << L0_SHIFT)) {
 		if (va < (1ULL << L1_SHIFT)) {
@@ -244,6 +280,8 @@ hibernate_enter_resume_2m_block(vaddr_t va, paddr_t pa)
 			    (((va >> L2_SHIFT) & (VP_IDX2_CNT - 1)) *
 			    sizeof(uint64_t)));
 			npte = (pa & HIB_OA_MASK) | HIB_PTE_ATTRS | L2_BLOCK;
+			*pte = 0;
+			hibernate_flush();
 			*pte = npte;
 		} else {
 			int l1_idx = (va >> L1_SHIFT) & (VP_IDX1_CNT - 1);
@@ -255,12 +293,16 @@ hibernate_enter_resume_2m_block(vaddr_t va, paddr_t pa)
 			pte = (uint64_t *)(hibernate_resume_pt_va +
 			    HIBERNATE_L1_LOW + l1_idx * sizeof(uint64_t));
 			npte = (l2pool_pa & HIB_OA_MASK) | L1_TABLE;
+			*pte = 0;
+			hibernate_flush();
 			*pte = npte;
 
 			pte = (uint64_t *)(l2pool_va +
 			    (((va >> L2_SHIFT) & (VP_IDX2_CNT - 1)) *
 			    sizeof(uint64_t)));
 			npte = (pa & HIB_OA_MASK) | HIB_PTE_ATTRS | L2_BLOCK;
+			*pte = 0;
+			hibernate_flush();
 			*pte = npte;
 		}
 	} else {
@@ -284,17 +326,23 @@ hibernate_enter_resume_2m_block(vaddr_t va, paddr_t pa)
 		pte = (uint64_t *)(hibernate_resume_pt_va + HIBERNATE_L0_PAGE +
 		    (l0_idx * sizeof(uint64_t)));
 		npte = ((piglet_pa + HIBERNATE_L1_HI) & HIB_OA_MASK) | L0_TABLE;
+		*pte = 0;
+		hibernate_flush();
 		*pte = npte;
 
 		pte = (uint64_t *)(hibernate_resume_pt_va + HIBERNATE_L1_HI +
 		    (l1_idx * sizeof(uint64_t)));
 		npte = (l2pool_pa & HIB_OA_MASK) | L1_TABLE;
+		*pte = 0;
+		hibernate_flush();
 		*pte = npte;
 
 		pte = (uint64_t *)(l2pool_va +
 		    (((va >> L2_SHIFT) & (VP_IDX2_CNT - 1)) *
 		    sizeof(uint64_t)));
 		npte = (pa & HIB_OA_MASK) | HIB_PTE_ATTRS | L2_BLOCK;
+		*pte = 0;
+		hibernate_flush();
 		*pte = npte;
 	}
 }
@@ -314,6 +362,8 @@ hibernate_enter_resume_4k_pte(vaddr_t va, paddr_t pa)
 	    (((va >> PAGE_SHIFT) & (VP_IDX3_CNT - 1)) * sizeof(uint64_t)));
 
 	npte = (pa & HIB_OA_MASK) | HIB_PTE_ATTRS | L3_P;
+	*pte = 0;
+	hibernate_flush();
 	*pte = npte;
 }
 
@@ -335,18 +385,15 @@ hibernate_populate_resume_pt(union hibernate_info *hib_info,
 	paddr_t pig_2m_start, pig_2m_end;
 	paddr_t pa;
 	uint64_t *pte, npte;
-	int i;
 
 	extern char __retguard_start[], __retguard_end[];
 	paddr_t rg_start_pa, rg_end_pa;
 	paddr_t rg_2m_start, rg_2m_end;
 
-	extern char __data_start[], _end[];
-	paddr_t kd_start_pa, kd_end_pa, kd_2m_start, kd_2m_end;
-
 	/* Piglet is already mapped at pig_va by uvm (no low-VA kenter on arm64) */
 	hibernate_resume_pt_va = pig_va;
-	hibernate_resume_pt_pa = pig_pa + HIBERNATE_L0_PAGE;
+	hibernate_resume_pt0_pa = pig_pa + HIBERNATE_L0_PAGE;
+	hibernate_resume_pt1_pa = pig_pa + HIBERNATE_PT1_L1_PAGE;
 
 	/* Resume stack at piglet HIGH VA (used before resume PT is activated) */
 	hibernate_stack_top_pa = pig_va + HIBERNATE_STACK_PAGE +
@@ -357,15 +404,15 @@ hibernate_populate_resume_pt(union hibernate_info *hib_info,
 	memset(hibernate_l1hi_to_l2pool, -1, sizeof(hibernate_l1hi_to_l2pool));
 	hibernate_l2hipool_next = 0;
 	hibernate_l0hi_slot = -1;
+	memset(hibernate_pt1_l1_to_l2pool, -1, sizeof(hibernate_pt1_l1_to_l2pool));
+	hibernate_pt1_l2pool_next = 0;
 
 	bzero((caddr_t)(pig_va + HIBERNATE_L0_PAGE),  PAGE_SIZE);
 	bzero((caddr_t)(pig_va + HIBERNATE_L1_LOW),   PAGE_SIZE);
 	bzero((caddr_t)(pig_va + HIBERNATE_L1_HI),    PAGE_SIZE);
 	bzero((caddr_t)(pig_va + HIBERNATE_L2_LOW),   PAGE_SIZE);
-	bzero((caddr_t)(pig_va + HIBERNATE_L2_LOW2),  PAGE_SIZE);
 	bzero((caddr_t)(pig_va + HIBERNATE_L3_LOW),   PAGE_SIZE);
-	bzero((caddr_t)(pig_va + HIBERNATE_L3_LOW2),  PAGE_SIZE);
-	bzero((caddr_t)(pig_va + HIBERNATE_L3_HI),    PAGE_SIZE);
+	bzero((caddr_t)(pig_va + HIBERNATE_PT1_L1_PAGE), PAGE_SIZE);
 	bzero((caddr_t)(pig_va + HIBERNATE_STACK_PAGE - 3 * PAGE_SIZE),
 	    3 * PAGE_SIZE);
 
@@ -382,20 +429,15 @@ hibernate_populate_resume_pt(union hibernate_info *hib_info,
 	npte = ((pig_pa + HIBERNATE_L3_LOW) & HIB_OA_MASK) | L2_TABLE;
 	pte[0] = npte;
 
-	for (i = 0; i < 3; i++) {
-		vaddr_t spv = HIBERNATE_STACK_PAGE - i * PAGE_SIZE;
-		hibernate_enter_resume_mapping(spv, pig_pa + spv, 0);
-	}
-
 	/* Kernel image at its kernel VA (symmetry with amd64; TTBR1 handles it) */
 	kern_start_2m_va = (vaddr_t)__text_start & ~((1ULL << L2_SHIFT) - 1);
 	kern_end_2m_va   = ((vaddr_t)_end + ((1ULL << L2_SHIFT) - 1)) &
 	    ~((1ULL << L2_SHIFT) - 1);
 
+	extern uint64_t pmap_avail_kvo;
 	for (page = kern_start_2m_va; page < kern_end_2m_va;
 	    page += (1ULL << L2_SHIFT)) {
-		if (!pmap_extract(pmap_kernel(), page, &pa))
-			continue;
+		pa = page + pmap_avail_kvo;
 		hibernate_enter_resume_mapping(page,
 		    pa & ~((1ULL << L2_SHIFT) - 1), 1);
 	}
@@ -410,18 +452,8 @@ hibernate_populate_resume_pt(union hibernate_info *hib_info,
 		    ~((1ULL << L2_SHIFT) - 1);
 		for (pa = rg_2m_start; pa < rg_2m_end; pa += (1ULL << L2_SHIFT))
 			hibernate_enter_resume_mapping(pa, pa, 1);
+
 	}
-
-	/* Identity-map kernel .data+.bss 2MB blocks for unpack-time memcpy */
-	if (!pmap_extract(pmap_kernel(), (vaddr_t)__data_start, &kd_start_pa) ||
-	    !pmap_extract(pmap_kernel(), trunc_page((vaddr_t)_end), &kd_end_pa))
-		panic("%s: pmap_extract kernel data range failed", __func__);
-
-	kd_2m_start = kd_start_pa & ~((1ULL << L2_SHIFT) - 1);
-	kd_2m_end = (kd_end_pa + ((1ULL << L2_SHIFT) - 1)) &
-	    ~((1ULL << L2_SHIFT) - 1);
-	for (pa = kd_2m_start; pa < kd_2m_end; pa += (1ULL << L2_SHIFT))
-		hibernate_enter_resume_mapping(pa, pa, 1);
 
 	/* Identity-map piglet at low VA (post-flip) and high VA (unpack time) */
 	piglet_start = pig_pa;
@@ -488,7 +520,7 @@ hibernate_inflate_skip(union hibernate_info *hib_info, paddr_t dest)
 	 */
 	if (dest >= hibdata_start_phys && dest < hibdata_end_phys)
 		return HIB_SKIP;
-	
+
 	return 0;
 }
 
@@ -538,5 +570,4 @@ hibernate_pmap_setup_md(void)
 void
 hibernate_pmap_teardown_md(void)
 {
-
 }

@@ -94,11 +94,19 @@ ENTRY(hibernate_activate_resume_pt_machdep)
 	msr	tcr_el1, x1
 	isb
 
-	adrp	x0, hibernate_resume_pt_pa
-	ldr	x0, [x0, :lo12:hibernate_resume_pt_pa]
+	adrp	x0, hibernate_resume_pt0_pa
+	ldr	x0, [x0, :lo12:hibernate_resume_pt0_pa]
 	dsb	ish
 	msr	ttbr0_el1, x0
 	isb
+
+	adrp	x0, hibernate_resume_pt1_pa
+	ldr	x0, [x0, :lo12:hibernate_resume_pt1_pa]
+	dsb	ish
+	msr	ttbr1_el1, x0
+	isb
+
+	dsb	ish
 	tlbi	vmalle1is
 	dsb	ish
 	isb

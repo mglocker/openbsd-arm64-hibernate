@@ -499,6 +499,10 @@ uvm_pmr_alloc_piglet(vaddr_t *va, paddr_t *pa, vsize_t sz, paddr_t align)
 		.kp_align = align,
 		.kp_maxseg = 1
 	};
+	struct kmem_va_mode kv_piglet = {
+		.kv_map = &kernel_map,
+		.kv_align = align,
+	};
 
 	/* Ensure align is a power of 2 */
 	KASSERT((align & (align - 1)) == 0);
@@ -513,7 +517,7 @@ uvm_pmr_alloc_piglet(vaddr_t *va, paddr_t *pa, vsize_t sz, paddr_t align)
 
 	sz = round_page(sz);
 
-	*va = (vaddr_t)km_alloc(sz, &kv_any, &kp_piglet, &kd_nowait);
+	*va = (vaddr_t)km_alloc(sz, &kv_piglet, &kp_piglet, &kd_nowait);
 	if (*va == 0)
 		return ENOMEM;
 
@@ -820,7 +824,7 @@ hibernate_inflate_region(union hibernate_info *hib, paddr_t dest,
 			    hib->piglet_pa + (110 * PAGE_SIZE) +
 			    hib->retguard_ofs, 0);
 			hib->retguard_ofs += PAGE_SIZE;
-			if (hib->retguard_ofs > 255 * PAGE_SIZE) {
+			if (hib->retguard_ofs > 63 * PAGE_SIZE) {
 				/*
 				 * XXX - this will likely reboot/hang most
 				 *       machines since the console output
