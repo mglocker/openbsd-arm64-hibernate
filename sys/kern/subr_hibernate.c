@@ -2072,15 +2072,6 @@ hibernate_free(void)
 {
 	pmap_activate(curproc);
 
-#ifndef __aarch64__
-	/* XXX arm64: uvm_unmap on kernel_map hangs post-resume; leak instead */
-	if (hibernate_temp_page) {
-		pmap_kremove(hibernate_temp_page, PAGE_SIZE);
-		km_free((void *)hibernate_temp_page, PAGE_SIZE,
-		    &kv_any, &kp_none);
-	}
-#endif
-
 	hibernate_temp_page = 0;
 	hibernate_pmap_teardown_md();
 	pmap_update(pmap_kernel());
