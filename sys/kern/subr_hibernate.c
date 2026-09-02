@@ -1292,7 +1292,6 @@ hibernate_unpack_image(union hibernate_info *hib)
 	}
 
 #ifdef __aarch64__
-	hibernate_dcache_flush_machdep();
 	hibernate_retguard_copy_machdep(global_piglet_va + 110 * PAGE_SIZE);
 	hibernate_resume_machdep(global_piglet_va + HIBERNATE_SAVED_CTX_PAGE);
 #else
