@@ -169,6 +169,49 @@ ENTRY(hibernate_save_state_machdep)
 END(hibernate_save_state_machdep)
 
 /*
+ * Clean+invalidate all D-cache levels (set/way) so unpack's TTBR0-side
+ * writes are visible to subsequent TTBR1-side reads.  Trashes x0..x10.
+ */
+ENTRY(hibernate_dcache_flush_machdep)
+	mrs	x0, clidr_el1
+	and	x3, x0, #0x7000000
+	lsr	x3, x3, #23
+	cbz	x3, 5f
+	mov	x10, #0
+1:      add	x2, x10, x10, lsr #1
+	lsr	x1, x0, x2
+	and	x1, x1, #7
+	cmp	x1, #2
+	b.lt	4f
+	msr	csselr_el1, x10
+	isb
+	mrs	x1, ccsidr_el1
+	and	x2, x1, #7
+	add	x2, x2, #4
+	mov	x4, #0x3ff
+	and	x4, x4, x1, lsr #3
+	clz	w5, w4
+	mov	x6, #0x7fff
+	and	x6, x6, x1, lsr #13
+2:      mov	x7, x4
+3:      lsl	x8, x7, x5
+	orr	x8, x10, x8
+	lsl	x9, x6, x2
+	orr	x8, x8, x9
+	dc	cisw, x8
+	subs	x7, x7, #1
+	b.ge	3b
+	subs	x6, x6, #1
+	b.ge	2b
+4:      add	x10, x10, #2
+	cmp	x3, x10
+	b.gt	1b
+5:      dsb	sy
+	isb
+	ret
+END(hibernate_dcache_flush_machdep)
+
+/*
  * Copy the suspender's retguard snapshot from its piglet holding slot
  * back into the retguard PAs that HIB_MOVE preserved during unpack.
  * Called from hibernate_unpack_image after the inflate loop and before
