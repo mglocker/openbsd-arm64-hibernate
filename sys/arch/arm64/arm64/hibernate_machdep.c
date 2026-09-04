@@ -44,6 +44,7 @@
 
 #include "sd.h"
 #include "softraid.h"
+#include "nvme.h"
 #include "ufshci.h"
 
 /* Hibernate support */
@@ -155,6 +156,8 @@ get_hibernate_io_function(dev_t dev)
 #if NSD > 0
 	if (strcmp(blkname, "sd") == 0) {
 		extern struct cfdriver sd_cd;
+		extern int nvme_hibernate_io(dev_t dev, daddr_t blkno,
+		    vaddr_t addr, size_t size, int op, void *page);
 		extern int sr_hibernate_io(dev_t dev, daddr_t blkno,
 		    vaddr_t addr, size_t size, int op, void *page);
 		extern int ufshci_hibernate_io(dev_t dev, daddr_t blkno,
@@ -164,6 +167,9 @@ get_hibernate_io_function(dev_t dev)
 			const char *driver;
 			hibio_fn io_func;
 		} sd_io_funcs[] = {
+#if NNVME > 0
+			{ "nvme", nvme_hibernate_io },
+#endif
 #if NSOFTRAID > 0
 			{ "softraid", sr_hibernate_io },
 #endif
