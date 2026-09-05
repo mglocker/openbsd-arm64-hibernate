@@ -1288,10 +1288,6 @@ hibernate_unpack_image(union hibernate_info *hib)
 		image_cur += chunks[fchunks[i]].compressed_size;
 	}
 
-#ifdef __aarch64__
-	hibernate_dcache_flush_machdep();
-#endif
-
 	/*
 	 * Resume the loaded kernel by jumping to the MD resume vector.
 	 * We won't be returning from this call. We pass the location of

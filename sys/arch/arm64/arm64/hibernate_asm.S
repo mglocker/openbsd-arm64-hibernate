@@ -55,6 +55,8 @@ ENTRY(hibernate_resume_machdep)
 	dsb	ish
 	isb
 
+	bl	hibernate_dcache_flush_machdep
+
 	adrp	x0, hibernate_jmpbuf
 	add	x0, x0, :lo12:hibernate_jmpbuf
 	b	longjmp
