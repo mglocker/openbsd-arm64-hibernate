@@ -451,28 +451,22 @@ gosleep(void *v)
 {
 #ifdef HIBERNATE
 	extern void (*powerdownfn)(void);
-	extern struct tty *constty;
+	extern label_t hibernate_jmpbuf;
+	extern uint64_t hibernate_tcr;
+	extern uint64_t hibernate_ttbr0;
+	extern uint64_t hibernate_ttbr1;
 
 	if (arm64_sleep_mode == SLEEP_HIBERNATE) {
-		extern int hibernate_resumed;
+		if (setjmp(&hibernate_jmpbuf))
+			return 0;
+
+		hibernate_tcr = READ_SPECIALREG(tcr_el1);
+		hibernate_ttbr0 = READ_SPECIALREG(ttbr0_el1);
+		hibernate_ttbr1 = READ_SPECIALREG(ttbr1_el1);
 
 		if (hibernate_suspend()) {
 			printf("hibernate_suspend failed\n");
 			return ECANCELED;
-		}
-
-		if (hibernate_resumed) {
-			/*
-			 * Suspending's constty (a .data global TTY pointer)
-			 * points at a TTY whose output queue state at save
-			 * time can't drain post-longjmp -- tputchar blocks
-			 * forever.  Clear constty so printf routes only via
-			 * cn_putc + msgbuf; wsdisplay's DVACT_RESUME will
-			 * re-establish TTY routing later.
-			 */
-			constty = NULL;
-			hibernate_resumed = 0;
-			return 0;
 		}
 
 		boothowto |= RB_POWERDOWN;

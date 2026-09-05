@@ -35,6 +35,4 @@ void	hibernate_quiesce_cpus(void);
 #endif /* MULTIPROCESSOR */
 
 /* arm64-only extras (see hibernate_var.h for the piglet save layout) */
-int	hibernate_save_state_machdep(void *);
 void	hibernate_dcache_flush_machdep(void);
-void	hibernate_retguard_copy_machdep(vaddr_t);

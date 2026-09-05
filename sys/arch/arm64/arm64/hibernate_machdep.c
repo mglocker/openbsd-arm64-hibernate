@@ -2,6 +2,7 @@
 
 /*
  * Copyright (c) 2026 Marcus Glocker <mglocker@openbsd.org>
+ * Copyright (c) 2026 Mark Kettenis <kettenis@openbsd.org>
  * Copyright (c) 2012 Mike Larkin <mlarkin@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -66,8 +67,11 @@ paddr_t hibernate_resume_pt0_pa __hibdata;
 paddr_t hibernate_resume_pt1_pa __hibdata;
 paddr_t hibernate_stack_top_pa __hibdata;
 
-/* Set by hibernate_suspend() on the resume path; read by gosleep(). */
-int hibernate_resumed;
+label_t hibernate_jmpbuf;
+
+uint64_t hibernate_tcr;
+uint64_t hibernate_ttbr0;
+uint64_t hibernate_ttbr1;
 
 /*
  * arm64 MD Hibernate functions
@@ -499,14 +503,6 @@ hibernate_inflate_skip(union hibernate_info *hib_info, paddr_t dest)
 {
 	extern paddr_t retguard_start_phys, retguard_end_phys;
 	extern paddr_t hibdata_start_phys, hibdata_end_phys;
-
-	/*
-	 * The setjmp/longjmp context page lives inside the piglet but must
-	 * be inflated from disk — it carries the suspender's CPU state that
-	 * hibernate_resume_machdep() jumps back into.
-	 */
-	if (dest == hib_info->piglet_pa + HIBERNATE_SAVED_CTX_PAGE)
-		return 0;
 
 	if (dest >= hib_info->piglet_pa &&
 	    dest < (hib_info->piglet_pa + 8 * HIBERNATE_CHUNK_SIZE))

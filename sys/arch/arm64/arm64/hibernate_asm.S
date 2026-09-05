@@ -2,6 +2,7 @@
 
 /*
  * Copyright (c) 2026 Marcus Glocker <mglocker@openbsd.org>
+ * Copyright (c) 2026 Mark Kettenis <kettenis@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,48 +24,26 @@
 	.text
 
 /*
- * Restore the suspending kernel's CPU context saved by
- * hibernate_save_state_machdep(), then long-jump back into that call
- * with x0 = 1 (the resume-path return value).
+ * Restore the suspending kernel's retguard area and MMU context,
+ * then restart the OS by long-jumping back into gosleep().
  *
- * x0 in: piglet KVA of the saved context struct
- *        (global_piglet_va + HIBERNATE_SAVED_CTX_PAGE).
- *
- * All ctx values are loaded into registers before the MSR sequence:
- * once ttbr1_el1 is swapped, the table walker uses the suspending
- * kernel's pmap, which is not guaranteed to map the address we were
- * reading from.
+ * x0 in: source VA (global_piglet_va + 110*PAGE_SIZE).
  *
  * DAIF is intentionally NOT restored -- the outer caller
  * re-establishes IRQ mask state.
  */
 ENTRY(hibernate_resume_machdep)
-	mov	x16, x0
+	bl	hibernate_retguard_copy_machdep
 
-	ldr	x1,  [x16, #0x60]	/* SP    */
-	ldr	x8,  [x16, #0x78]	/* MAIR  */
-	ldr	x9,  [x16, #0x70]	/* TCR   */
-	ldr	x10, [x16, #0x68]	/* TTBR1 */
-	ldr	x11, [x16, #0xa0]	/* TTBR0 */
-	ldr	x12, [x16, #0x88]	/* VBAR  */
-	ldr	x13, [x16, #0x90]	/* TPIDR */
-	ldr	x14, [x16, #0x80]	/* SCTLR */
-
-	ldp	x19, x20, [x16, #0x00]
-	ldp	x21, x22, [x16, #0x10]
-	ldp	x23, x24, [x16, #0x20]
-	ldp	x25, x26, [x16, #0x30]
-	ldp	x27, x28, [x16, #0x40]
-	ldp	x29, x30, [x16, #0x50]
-
-	mov	sp, x1
-
-	msr	mair_el1, x8
-	msr	tcr_el1, x9
-	msr	ttbr1_el1, x10
-	msr	ttbr0_el1, x11
-	msr	vbar_el1, x12
-	msr	tpidr_el1, x13
+	adrp	x0, hibernate_tcr
+	ldr	x0, [x0, :lo12:hibernate_tcr]
+	msr	tcr_el1, x0
+	adrp	x0, hibernate_ttbr0
+	ldr	x0, [x0, :lo12:hibernate_ttbr0]
+	msr	ttbr1_el1, x0
+	adrp	x0, hibernate_ttbr1
+	ldr	x0, [x0, :lo12:hibernate_ttbr1]
+	msr	ttbr1_el1, x0
 	isb
 
 	dsb	ish
@@ -76,11 +55,9 @@ ENTRY(hibernate_resume_machdep)
 	dsb	ish
 	isb
 
-	msr	sctlr_el1, x14
-	isb
-
-	mov	x0, #1
-	ret
+	adrp	x0, hibernate_jmpbuf
+	add	x0, x0, :lo12:hibernate_jmpbuf
+	b	longjmp
 END(hibernate_resume_machdep)
 
 /*
@@ -129,44 +106,6 @@ ENTRY(hibernate_flush)
 	isb
 	ret
 END(hibernate_flush)
-
-/*
- * setjmp-style save of callee-saved GPs, SP, and the sysregs that
- * hibernate_resume_machdep() will restore.  Returns 0; long-jump returns 1.
- */
-ENTRY(hibernate_save_state_machdep)
-	stp	x19, x20, [x0, #0x00]
-	stp	x21, x22, [x0, #0x10]
-	stp	x23, x24, [x0, #0x20]
-	stp	x25, x26, [x0, #0x30]
-	stp	x27, x28, [x0, #0x40]
-	stp	x29, x30, [x0, #0x50]
-
-	mov	x1, sp
-	str	x1, [x0, #0x60]
-
-	mrs	x1, ttbr1_el1
-	str	x1, [x0, #0x68]
-	mrs	x1, tcr_el1
-	str	x1, [x0, #0x70]
-	mrs	x1, mair_el1
-	str	x1, [x0, #0x78]
-	mrs	x1, sctlr_el1
-	str	x1, [x0, #0x80]
-	mrs	x1, vbar_el1
-	str	x1, [x0, #0x88]
-	mrs	x1, tpidr_el1
-	str	x1, [x0, #0x90]
-	mrs	x1, daif
-	str	x1, [x0, #0x98]
-	mrs	x1, ttbr0_el1
-	str	x1, [x0, #0xa0]
-
-	dsb	sy
-
-	mov	x0, #0
-	ret
-END(hibernate_save_state_machdep)
 
 /*
  * Clean+invalidate all D-cache levels (set/way) so unpack's TTBR0-side

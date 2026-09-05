@@ -90,9 +90,6 @@ paddr_t global_pig_start;
  */
 vaddr_t global_piglet_va;
 paddr_t global_piglet_pa;
-#ifdef __aarch64__
-extern int hibernate_resumed;
-#endif
 
 /* #define HIB_DEBUG */
 #ifdef HIB_DEBUG
@@ -824,7 +821,7 @@ hibernate_inflate_region(union hibernate_info *hib, paddr_t dest,
 			    hib->piglet_pa + (110 * PAGE_SIZE) +
 			    hib->retguard_ofs, 0);
 			hib->retguard_ofs += PAGE_SIZE;
-			if (hib->retguard_ofs > 63 * PAGE_SIZE) {
+			if (hib->retguard_ofs > 31 * PAGE_SIZE) {
 				/*
 				 * XXX - this will likely reboot/hang most
 				 *       machines since the console output
@@ -1293,9 +1290,8 @@ hibernate_unpack_image(union hibernate_info *hib)
 
 #ifdef __aarch64__
 	hibernate_dcache_flush_machdep();
-	hibernate_retguard_copy_machdep(global_piglet_va + 110 * PAGE_SIZE);
-	hibernate_resume_machdep(global_piglet_va + HIBERNATE_SAVED_CTX_PAGE);
-#else
+#endif
+
 	/*
 	 * Resume the loaded kernel by jumping to the MD resume vector.
 	 * We won't be returning from this call. We pass the location of
@@ -1310,7 +1306,6 @@ hibernate_unpack_image(union hibernate_info *hib)
 	 * copy code in hibernate_resume_machdep.)
 	 */
 	hibernate_resume_machdep(global_piglet_va + (110 * PAGE_SIZE));
-#endif
 	/* NOTREACHED */
 }
 
@@ -1993,14 +1988,6 @@ hibernate_suspend(void)
 	    btodb(HIBERNATE_CHUNK_TABLE_SIZE));
 
 	pmap_activate(curproc);
-#ifdef __aarch64__
-	/* setjmp-style save; returns 1 on the longjmp-back resume path. */
-	if (hibernate_save_state_machdep((void *)(global_piglet_va +
-	    HIBERNATE_SAVED_CTX_PAGE)) == 1) {
-		hibernate_resumed = 1;
-		return (0);
-	}
-#endif
 	DPRINTF("hibernate: writing chunks\n");
 	if (hibernate_write_chunks(hib)) {
 		DPRINTF("hibernate_write_chunks failed\n");

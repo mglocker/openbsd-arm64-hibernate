@@ -52,9 +52,6 @@ extern vaddr_t global_piglet_va;
 #endif
 #define HIBERNATE_HIBALLOC_PAGE	(global_piglet_va + PAGE_SIZE * 366)
 
-/* setjmp/longjmp CPU context save area */
-#define HIBERNATE_SAVED_CTX_PAGE	(PAGE_SIZE * 400)
-
 /* Use 4MB hibernation chunks */
 #define HIBERNATE_CHUNK_SIZE		0x400000
 
