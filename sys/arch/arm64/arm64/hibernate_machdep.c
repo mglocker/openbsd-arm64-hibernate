@@ -467,12 +467,12 @@ hibernate_populate_resume_pt(union hibernate_info *hib_info,
 
 	/* Identity-map piglet at low VA (post-flip) and high VA (unpack time) */
 	piglet_start = pig_pa;
-	piglet_end   = pig_pa + HIBERNATE_CHUNK_SIZE * 8;
+	piglet_end   = pig_pa + HIBERNATE_CHUNK_SIZE * 4;
 	for (pa = piglet_start; pa < piglet_end; pa += (1ULL << L2_SHIFT))
 		hibernate_enter_resume_mapping(pa, pa, 1);
 
 	for (page = pig_va, pa = pig_pa; page < pig_va +
-	    HIBERNATE_CHUNK_SIZE * 8; page += (1ULL << L2_SHIFT),
+	    HIBERNATE_CHUNK_SIZE * 4; page += (1ULL << L2_SHIFT),
 	    pa += (1ULL << L2_SHIFT))
 		hibernate_enter_resume_mapping(page, pa, 1);
 
@@ -505,7 +505,7 @@ hibernate_inflate_skip(union hibernate_info *hib_info, paddr_t dest)
 	extern paddr_t hibdata_start_phys, hibdata_end_phys;
 
 	if (dest >= hib_info->piglet_pa &&
-	    dest < (hib_info->piglet_pa + 8 * HIBERNATE_CHUNK_SIZE))
+	    dest < (hib_info->piglet_pa + 4 * HIBERNATE_CHUNK_SIZE))
 		return HIB_SKIP;
 
 	/*

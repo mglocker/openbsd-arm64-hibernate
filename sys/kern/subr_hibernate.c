@@ -22,8 +22,6 @@
 #include <sys/param.h>
 #include <sys/tree.h>
 #include <sys/systm.h>
-#include <sys/proc.h>
-#include <sys/device.h>
 #include <sys/disklabel.h>
 #include <sys/disk.h>
 #include <sys/conf.h>
@@ -2054,13 +2052,13 @@ unmap:
 void
 hibernate_free(void)
 {
+	pmap_activate(curproc);
+
 	if (hibernate_temp_page) {
 		pmap_kremove(hibernate_temp_page, PAGE_SIZE);
 		km_free((void *)hibernate_temp_page, PAGE_SIZE,
 		    &kv_any, &kp_none);
 	}
-
-	pmap_activate(curproc);
 
 	hibernate_temp_page = 0;
 	hibernate_pmap_teardown_md();
@@ -2073,7 +2071,7 @@ preallocate_hibernate_memory(void)
 	/* Preallocate a piglet */
 	if (ptoa((psize_t)physmem) > HIBERNATE_MIN_MEMORY) {
 		if (uvm_pmr_alloc_piglet(&global_piglet_va, &global_piglet_pa,
-		    HIBERNATE_CHUNK_SIZE * 8, HIBERNATE_CHUNK_SIZE)) {
+		    HIBERNATE_CHUNK_SIZE * 4, HIBERNATE_CHUNK_SIZE)) {
 			DPRINTF("%s: failed to preallocate hibernate mem\n",
 			    __func__);
 			global_piglet_va = 0;
