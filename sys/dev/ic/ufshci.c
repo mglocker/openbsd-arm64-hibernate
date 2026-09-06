@@ -1990,6 +1990,9 @@ ufshci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 	if (UFSHCI_READ_4(my->sc, UFSHCI_REG_UTRLRSR) != 1)
 		return EIO;
 
+	/* XXX bus_dmamap_sync() */
+	membar_sync();
+
 	ufshci_doorbell_write(my->sc, slot);
 
 	/* ufshci_doorbell_poll() adaption for hibernate. */
@@ -2003,6 +2006,9 @@ ufshci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 	if (timeout_us == 0)
 		return EIO;
 	UFSHCI_WRITE_4(my->sc, UFSHCI_REG_UTRLCNR, (1U << slot));
+
+	/* XXX bus_dmamap_sync() */
+	membar_sync();
 
 	/* Check if the command was successfully executed. */
 	if (my->utrd.dw2 != UFSHCI_UTRD_DW2_OCS_SUCCESS)
